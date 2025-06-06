@@ -7,15 +7,16 @@ import os
 import traceback
 import json
 
-# Google Sheets API setup
-import google.auth
+# Google Sheets API
 from googleapiclient.discovery import build
 from google.oauth2 import service_account
 
 app = Flask(__name__)
 
-# Load Google credentials from JSON file (place this in your repo or env var)
-GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")  # Your actual sheet ID
+# 🟡 Replace this with your actual Sheet ID (from the URL)
+GOOGLE_SHEET_ID = "1xnVihsf6H3brKf2NOz2Puo3CX-5Vj7cUJQm9144VIh0"
+
+# 🟡 Replace this with your actual service account JSON (as environment or hardcoded)
 SERVICE_ACCOUNT_INFO = json.loads(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "{}"))
 
 def log_to_google_sheet(data_dict):
@@ -28,16 +29,16 @@ def log_to_google_sheet(data_dict):
         sheet = service.spreadsheets()
 
         now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-
         values = [[now] + [data_dict.get(c, "Neutral") for c in ["USD", "EUR", "JPY", "GBP", "AUD", "NZD", "CHF", "CAD"]]]
-
         body = {"values": values}
+        
         sheet.values().append(
             spreadsheetId=GOOGLE_SHEET_ID,
             range="Sheet1!A1",
             valueInputOption="USER_ENTERED",
             body=body
         ).execute()
+        
         print("✅ Logged to Google Sheets")
     except Exception as e:
         print("❌ Error logging to Google Sheets:", e)
@@ -54,6 +55,7 @@ def fetch_news():
 def parse_and_analyze(xml_data):
     root = ET.fromstring(xml_data)
     currency_stats = defaultdict(list)
+
     for item in root.findall("event"):
         currency = item.find("currency").text
         impact = item.find("impact").text
@@ -71,7 +73,7 @@ def parse_and_analyze(xml_data):
                 else:
                     currency_stats[currency].append("Neutral")
             except Exception as e:
-                print(f"Error parsing actual/forecast values: {e}")
+                print(f"Error parsing values: {e}")
                 continue
 
     final_result = {}
@@ -98,8 +100,7 @@ def news_summary_txt():
 
         now = datetime.utcnow().strftime("%Y-%m-%d %H:%M GMT")
         lines = [f"Date: {now}", ""]
-        currencies = ["USD", "EUR", "JPY", "GBP", "AUD", "NZD", "CHF", "CAD"]
-        for c in currencies:
+        for c in ["USD", "EUR", "JPY", "GBP", "AUD", "NZD", "CHF", "CAD"]:
             sentiment = result.get(c, "Neutral")
             lines.append(f"{c} - {sentiment}")
 
