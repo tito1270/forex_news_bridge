@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, Response, request
+from flask import Flask, jsonify, Response, request, send_from_directory
 import requests
 import xml.etree.ElementTree as ET
 from collections import defaultdict
@@ -6,6 +6,8 @@ from datetime import datetime
 import os
 import traceback
 import json
+import csv
+from io import StringIO
 
 # Google Sheets API
 from googleapiclient.discovery import build
@@ -13,10 +15,7 @@ from google.oauth2 import service_account
 
 app = Flask(__name__)
 
-# 🟡 Replace this with your actual Sheet ID (from the URL)
 GOOGLE_SHEET_ID = "1xnVihsf6H3brKf2NOz2Puo3CX-5Vj7cUJQm9144VIh0"
-
-# 🟡 Replace this with your actual service account JSON (as environment or hardcoded)
 SERVICE_ACCOUNT_INFO = json.loads(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "{}"))
 
 def log_to_google_sheet(data_dict):
@@ -112,6 +111,30 @@ def news_summary_txt():
         traceback.print_exc()
         return Response("Internal Server Error", status=500)
 
+@app.route('/ForexSentiment.csv')
+def forex_sentiment_csv():
+    try:
+        xml_data = fetch_news()
+        result = parse_and_analyze(xml_data)
+
+        # Prepare CSV in-memory
+        output = StringIO()
+        writer = csv.writer(output)
+        header = ["Currency", "Sentiment"]
+        writer.writerow(header)
+        for c in ["USD", "EUR", "JPY", "GBP", "AUD", "NZD", "CHF", "CAD"]:
+            writer.writerow([c, result.get(c, "Neutral")])
+
+        csv_data = output.getvalue()
+        output.close()
+
+        return Response(csv_data, mimetype='text/csv', headers={"Content-disposition": "attachment; filename=ForexSentiment.csv"})
+
+    except Exception as e:
+        print("Error in /ForexSentiment.csv endpoint:")
+        traceback.print_exc()
+        return Response("Internal Server Error", status=500)
+
 @app.route('/')
 def home():
     return "API is working!"
@@ -119,3 +142,4 @@ def home():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
+
