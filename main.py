@@ -1,6 +1,6 @@
 from flask import Flask, Response
 import requests
-import xml.etree.ElementTree as ET
+from bs4 import BeautifulSoup
 from collections import defaultdict
 from datetime import datetime
 import os
@@ -17,7 +17,6 @@ app = Flask(__name__)
 
 GOOGLE_SHEET_ID = "1xnVihsf6H3brKf2NOz2Puo3CX-5Vj7cUJQm9144VIh0"
 
-# Load Google Service Account info from environment variable
 try:
     SERVICE_ACCOUNT_INFO = json.loads(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "{}"))
     if not SERVICE_ACCOUNT_INFO:
@@ -54,70 +53,82 @@ def log_to_google_sheet(data_dict):
         logging.error(f"Error logging to Google Sheets: {e}")
 
 def fetch_news():
-    url = "https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.xml"
+    url = "https://www.forexfactory.com/calendar.php"
     logging.info(f"Fetching news from {url}")
     try:
-        response = requests.get(url, timeout=10)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (compatible; ForexSentimentBot/1.0)"
+        }
+        response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
-        return response.content
+        return response.text
     except requests.RequestException as e:
-        logging.error(f"Failed to fetch Forex Factory news: {e}")
+        logging.error(f"Failed to fetch Forex Factory calendar page: {e}")
         raise
 
-def parse_and_analyze(xml_data):
-    try:
-        root = ET.fromstring(xml_data)
-    except ET.ParseError as e:
-        logging.error(f"XML parsing error: {e}")
-        return {}
+def parse_and_analyze(html_data):
+    soup = BeautifulSoup(html_data, "html.parser")
 
     currency_stats = defaultdict(list)
 
-    for item in root.findall("event"):
-        currency_elem = item.find("currency")
-        impact_elem = item.find("impact")
-        actual_elem = item.find("actual")
-        forecast_elem = item.find("forecast")
+    # The calendar table rows have class "calendar__row"
+    rows = soup.select("tr.calendar__row")
+    if not rows:
+        logging.warning("No calendar rows found on the page.")
+        return {}
 
-        if not (currency_elem is not None and impact_elem is not None and
-                actual_elem is not None and forecast_elem is not None):
+    for row in rows:
+        # Extract currency
+        currency_td = row.find("td", class_="calendar__currency")
+        if not currency_td:
+            continue
+        currency = currency_td.text.strip()
+
+        # Extract impact
+        impact_td = row.find("td", class_="impact")
+        if not impact_td:
+            continue
+        # Impact is shown as icons with alt text, e.g., "High Impact"
+        impact_icon = impact_td.find("span", class_="impact-icon")
+        impact = impact_icon['title'] if impact_icon and impact_icon.has_attr('title') else ""
+
+        if impact not in ("High Impact", "Medium Impact"):
             continue
 
-        currency = currency_elem.text
-        impact = impact_elem.text
-        actual = actual_elem.text
-        forecast = forecast_elem.text
+        # Extract actual and forecast
+        actual_td = row.find("td", class_="actual")
+        forecast_td = row.find("td", class_="forecast")
 
-        if impact not in ("High", "Medium") or not actual or not forecast:
+        actual = actual_td.text.strip() if actual_td else ""
+        forecast = forecast_td.text.strip() if forecast_td else ""
+
+        if not actual or not forecast or actual == "-" or forecast == "-":
             continue
 
-        try:
-            # Convert strings like "1.2M", "3.4K", "5.6%" into floats
-            def convert_val(val):
-                if val is None:
-                    return None
-                val = val.replace("%", "").upper()
+        # Convert actual and forecast strings to floats for comparison
+        def convert_val(val):
+            try:
+                val = val.replace("%", "").replace(",", "").upper()
                 if "M" in val:
                     return float(val.replace("M", "")) * 1_000_000
                 if "K" in val:
                     return float(val.replace("K", "")) * 1_000
                 return float(val)
+            except:
+                return None
 
-            actual_val = convert_val(actual)
-            forecast_val = convert_val(forecast)
+        actual_val = convert_val(actual)
+        forecast_val = convert_val(forecast)
 
-            if actual_val is None or forecast_val is None:
-                continue
-
-            if actual_val > forecast_val:
-                currency_stats[currency].append("Bullish")
-            elif actual_val < forecast_val:
-                currency_stats[currency].append("Bearish")
-            else:
-                currency_stats[currency].append("Neutral")
-        except Exception as e:
-            logging.warning(f"Value conversion error for currency {currency}: {e}")
+        if actual_val is None or forecast_val is None:
             continue
+
+        if actual_val > forecast_val:
+            currency_stats[currency].append("Bullish")
+        elif actual_val < forecast_val:
+            currency_stats[currency].append("Bearish")
+        else:
+            currency_stats[currency].append("Neutral")
 
     final_result = {}
     for currency, signals in currency_stats.items():
@@ -135,10 +146,9 @@ def parse_and_analyze(xml_data):
 @app.route('/summary.txt')
 def news_summary_txt():
     try:
-        xml_data = fetch_news()
-        result = parse_and_analyze(xml_data)
+        html_data = fetch_news()
+        result = parse_and_analyze(html_data)
 
-        # Log to Google Sheets if possible
         log_to_google_sheet(result)
 
         now = datetime.utcnow().strftime("%Y-%m-%d %H:%M GMT")
@@ -157,8 +167,8 @@ def news_summary_txt():
 @app.route('/ForexSentiment.csv')
 def forex_sentiment_csv():
     try:
-        xml_data = fetch_news()
-        result = parse_and_analyze(xml_data)
+        html_data = fetch_news()
+        result = parse_and_analyze(html_data)
 
         output = StringIO()
         writer = csv.writer(output)
@@ -188,3 +198,4 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
     port = int(os.getenv('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
+
