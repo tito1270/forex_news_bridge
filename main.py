@@ -17,6 +17,7 @@ app = Flask(__name__)
 
 GOOGLE_SHEET_ID = "1xnVihsf6H3brKf2NOz2Puo3CX-5Vj7cUJQm9144VIh0"
 
+# Load Google Service Account info from environment variable
 try:
     SERVICE_ACCOUNT_INFO = json.loads(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "{}"))
     if not SERVICE_ACCOUNT_INFO:
@@ -54,81 +55,86 @@ def log_to_google_sheet(data_dict):
 
 def fetch_news():
     url = "https://www.forexfactory.com/calendar.php"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/114.0.0.0 Safari/537.36"
+    }
     logging.info(f"Fetching news from {url}")
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (compatible; ForexSentimentBot/1.0)"
-        }
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
-        return response.text
+        return response.text  # HTML string
     except requests.RequestException as e:
         logging.error(f"Failed to fetch Forex Factory calendar page: {e}")
         raise
 
 def parse_and_analyze(html_data):
     soup = BeautifulSoup(html_data, "html.parser")
-
     currency_stats = defaultdict(list)
 
-    # The calendar table rows have class "calendar__row"
-    rows = soup.select("tr.calendar__row")
-    if not rows:
-        logging.warning("No calendar rows found on the page.")
-        return {}
-
+    # The calendar events are in rows with class "calendar__row"
+    rows = soup.find_all("tr", class_="calendar__row")
     for row in rows:
-        # Extract currency
+        # Currency is in a <td> with class 'calendar__currency'
         currency_td = row.find("td", class_="calendar__currency")
         if not currency_td:
             continue
         currency = currency_td.text.strip()
 
-        # Extract impact
+        # Impact is in a span with class like 'impact' inside a td class='impact'
         impact_td = row.find("td", class_="impact")
         if not impact_td:
             continue
-        # Impact is shown as icons with alt text, e.g., "High Impact"
-        impact_icon = impact_td.find("span", class_="impact-icon")
-        impact = impact_icon['title'] if impact_icon and impact_icon.has_attr('title') else ""
+        impact_span = impact_td.find("span", class_="impact")
+        if not impact_span:
+            continue
+        impact = impact_span.get("title", "").strip()  # e.g. "High Impact"
 
-        if impact not in ("High Impact", "Medium Impact"):
+        # We only want High or Medium impact events
+        if not impact.lower().startswith(("high", "medium")):
             continue
 
-        # Extract actual and forecast
+        # Actual and Forecast values
         actual_td = row.find("td", class_="actual")
         forecast_td = row.find("td", class_="forecast")
-
-        actual = actual_td.text.strip() if actual_td else ""
-        forecast = forecast_td.text.strip() if forecast_td else ""
-
-        if not actual or not forecast or actual == "-" or forecast == "-":
+        if actual_td is None or forecast_td is None:
             continue
 
-        # Convert actual and forecast strings to floats for comparison
-        def convert_val(val):
-            try:
+        actual = actual_td.text.strip()
+        forecast = forecast_td.text.strip()
+
+        # If no actual or forecast, skip
+        if actual == "" or forecast == "":
+            continue
+
+        try:
+            # Convert values like "1.2M", "3.4K", "5.6%" into floats
+            def convert_val(val):
+                if val is None:
+                    return None
                 val = val.replace("%", "").replace(",", "").upper()
                 if "M" in val:
                     return float(val.replace("M", "")) * 1_000_000
                 if "K" in val:
                     return float(val.replace("K", "")) * 1_000
                 return float(val)
-            except:
-                return None
 
-        actual_val = convert_val(actual)
-        forecast_val = convert_val(forecast)
+            actual_val = convert_val(actual)
+            forecast_val = convert_val(forecast)
 
-        if actual_val is None or forecast_val is None:
+            if actual_val is None or forecast_val is None:
+                continue
+
+            if actual_val > forecast_val:
+                currency_stats[currency].append("Bullish")
+            elif actual_val < forecast_val:
+                currency_stats[currency].append("Bearish")
+            else:
+                currency_stats[currency].append("Neutral")
+        except Exception as e:
+            logging.warning(f"Value conversion error for currency {currency}: {e}")
             continue
-
-        if actual_val > forecast_val:
-            currency_stats[currency].append("Bullish")
-        elif actual_val < forecast_val:
-            currency_stats[currency].append("Bearish")
-        else:
-            currency_stats[currency].append("Neutral")
 
     final_result = {}
     for currency, signals in currency_stats.items():
@@ -149,6 +155,7 @@ def news_summary_txt():
         html_data = fetch_news()
         result = parse_and_analyze(html_data)
 
+        # Log to Google Sheets if possible
         log_to_google_sheet(result)
 
         now = datetime.utcnow().strftime("%Y-%m-%d %H:%M GMT")
@@ -198,4 +205,5 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
     port = int(os.getenv('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
+
 
