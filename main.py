@@ -1,14 +1,13 @@
-from flask import Flask, jsonify, Response, request, send_from_directory
+from flask import Flask, Response
 import requests
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from datetime import datetime
 import os
-import traceback
-import json
-import csv
-from io import StringIO
 import logging
+import json
+from io import StringIO
+import csv
 
 # Google Sheets API
 from googleapiclient.discovery import build
@@ -18,18 +17,18 @@ app = Flask(__name__)
 
 GOOGLE_SHEET_ID = "1xnVihsf6H3brKf2NOz2Puo3CX-5Vj7cUJQm9144VIh0"
 
-# Load and validate SERVICE_ACCOUNT_INFO safely
+# Load Google Service Account info from environment variable
 try:
     SERVICE_ACCOUNT_INFO = json.loads(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "{}"))
     if not SERVICE_ACCOUNT_INFO:
-        raise ValueError("Empty service account info")
+        raise ValueError("Empty Google Service Account info")
 except Exception as e:
     SERVICE_ACCOUNT_INFO = None
-    logging.warning(f"Google Service Account JSON not properly loaded: {e}")
+    logging.warning(f"Google Service Account JSON not loaded: {e}")
 
 def log_to_google_sheet(data_dict):
     if not SERVICE_ACCOUNT_INFO:
-        logging.warning("Google Sheets logging skipped due to missing credentials")
+        logging.warning("Skipping Google Sheets logging due to missing credentials")
         return
     
     try:
@@ -43,65 +42,82 @@ def log_to_google_sheet(data_dict):
         now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         values = [[now] + [data_dict.get(c, "Neutral") for c in ["USD", "EUR", "JPY", "GBP", "AUD", "NZD", "CHF", "CAD"]]]
         body = {"values": values}
-        
+
         sheet.values().append(
             spreadsheetId=GOOGLE_SHEET_ID,
             range="Sheet1!A1",
             valueInputOption="USER_ENTERED",
             body=body
         ).execute()
-        
-        logging.info("✅ Logged to Google Sheets")
+        logging.info("✅ Logged data to Google Sheets")
     except Exception as e:
-        logging.error(f"❌ Error logging to Google Sheets: {e}")
+        logging.error(f"Error logging to Google Sheets: {e}")
 
 def fetch_news():
     url = "https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.xml"
-    logging.info(f"Fetching news from: {url}")
-    response = requests.get(url)
-    if response.status_code != 200:
-        logging.error(f"Failed to fetch Forex Factory news, status code: {response.status_code}")
-        raise Exception("Failed to fetch Forex Factory news")
-    return response.content
+    logging.info(f"Fetching news from {url}")
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        return response.content
+    except requests.RequestException as e:
+        logging.error(f"Failed to fetch Forex Factory news: {e}")
+        raise
 
 def parse_and_analyze(xml_data):
-    root = ET.fromstring(xml_data)
+    try:
+        root = ET.fromstring(xml_data)
+    except ET.ParseError as e:
+        logging.error(f"XML parsing error: {e}")
+        return {}
+
     currency_stats = defaultdict(list)
 
     for item in root.findall("event"):
-        # Safely get elements and their text
         currency_elem = item.find("currency")
         impact_elem = item.find("impact")
         actual_elem = item.find("actual")
         forecast_elem = item.find("forecast")
 
-        if not (currency_elem and impact_elem and actual_elem and forecast_elem):
-            continue  # skip if any required field is missing
+        if not (currency_elem is not None and impact_elem is not None and
+                actual_elem is not None and forecast_elem is not None):
+            continue
 
         currency = currency_elem.text
         impact = impact_elem.text
         actual = actual_elem.text
         forecast = forecast_elem.text
 
-        if impact in ("High", "Medium") and actual and forecast:
-            try:
-                # Replace K and M with numbers safely
-                def convert_val(val):
-                    val = val.replace("K", "000").replace("M", "000000").replace("%", "")
-                    return float(val)
+        if impact not in ("High", "Medium") or not actual or not forecast:
+            continue
 
-                actual_val = convert_val(actual)
-                forecast_val = convert_val(forecast)
+        try:
+            # Convert strings like "1.2M", "3.4K", "5.6%" into floats
+            def convert_val(val):
+                if val is None:
+                    return None
+                val = val.replace("%", "").upper()
+                if "M" in val:
+                    return float(val.replace("M", "")) * 1_000_000
+                if "K" in val:
+                    return float(val.replace("K", "")) * 1_000
+                return float(val)
 
-                if actual_val > forecast_val:
-                    currency_stats[currency].append("Bullish")
-                elif actual_val < forecast_val:
-                    currency_stats[currency].append("Bearish")
-                else:
-                    currency_stats[currency].append("Neutral")
-            except Exception as e:
-                logging.warning(f"Error parsing values for currency {currency}: {e}")
+            actual_val = convert_val(actual)
+            forecast_val = convert_val(forecast)
+
+            if actual_val is None or forecast_val is None:
                 continue
+
+            if actual_val > forecast_val:
+                currency_stats[currency].append("Bullish")
+            elif actual_val < forecast_val:
+                currency_stats[currency].append("Bearish")
+            else:
+                currency_stats[currency].append("Neutral")
+        except Exception as e:
+            logging.warning(f"Value conversion error for currency {currency}: {e}")
+            continue
 
     final_result = {}
     for currency, signals in currency_stats.items():
@@ -122,7 +138,7 @@ def news_summary_txt():
         xml_data = fetch_news()
         result = parse_and_analyze(xml_data)
 
-        # Log to Google Sheets
+        # Log to Google Sheets if possible
         log_to_google_sheet(result)
 
         now = datetime.utcnow().strftime("%Y-%m-%d %H:%M GMT")
@@ -144,18 +160,21 @@ def forex_sentiment_csv():
         xml_data = fetch_news()
         result = parse_and_analyze(xml_data)
 
-        # Prepare CSV in-memory
         output = StringIO()
         writer = csv.writer(output)
-        header = ["Currency", "Sentiment"]
-        writer.writerow(header)
+        writer.writerow(["Currency", "Sentiment"])
+
         for c in ["USD", "EUR", "JPY", "GBP", "AUD", "NZD", "CHF", "CAD"]:
             writer.writerow([c, result.get(c, "Neutral")])
 
         csv_data = output.getvalue()
         output.close()
 
-        return Response(csv_data, mimetype='text/csv', headers={"Content-disposition": "attachment; filename=ForexSentiment.csv"})
+        return Response(
+            csv_data,
+            mimetype='text/csv',
+            headers={"Content-Disposition": "attachment; filename=ForexSentiment.csv"}
+        )
 
     except Exception:
         logging.error("Error in /ForexSentiment.csv endpoint", exc_info=True)
@@ -163,10 +182,9 @@ def forex_sentiment_csv():
 
 @app.route('/')
 def home():
-    return "API is working!"
+    return "Forex Sentiment API is running!"
 
 if __name__ == '__main__':
-    # Set logging level
     logging.basicConfig(level=logging.INFO)
-    port = int(os.environ.get('PORT', 5000))
+    port = int(os.getenv('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
