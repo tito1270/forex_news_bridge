@@ -8,6 +8,7 @@ import traceback
 import json
 import csv
 from io import StringIO
+import logging
 
 # Google Sheets API
 from googleapiclient.discovery import build
@@ -16,9 +17,21 @@ from google.oauth2 import service_account
 app = Flask(__name__)
 
 GOOGLE_SHEET_ID = "1xnVihsf6H3brKf2NOz2Puo3CX-5Vj7cUJQm9144VIh0"
-SERVICE_ACCOUNT_INFO = json.loads(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "{}"))
+
+# Load and validate SERVICE_ACCOUNT_INFO safely
+try:
+    SERVICE_ACCOUNT_INFO = json.loads(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "{}"))
+    if not SERVICE_ACCOUNT_INFO:
+        raise ValueError("Empty service account info")
+except Exception as e:
+    SERVICE_ACCOUNT_INFO = None
+    logging.warning(f"Google Service Account JSON not properly loaded: {e}")
 
 def log_to_google_sheet(data_dict):
+    if not SERVICE_ACCOUNT_INFO:
+        logging.warning("Google Sheets logging skipped due to missing credentials")
+        return
+    
     try:
         creds = service_account.Credentials.from_service_account_info(
             SERVICE_ACCOUNT_INFO,
@@ -38,16 +51,16 @@ def log_to_google_sheet(data_dict):
             body=body
         ).execute()
         
-        print("✅ Logged to Google Sheets")
+        logging.info("✅ Logged to Google Sheets")
     except Exception as e:
-        print("❌ Error logging to Google Sheets:", e)
+        logging.error(f"❌ Error logging to Google Sheets: {e}")
 
 def fetch_news():
     url = "https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.xml"
-    print("Fetching news from:", url)
+    logging.info(f"Fetching news from: {url}")
     response = requests.get(url)
     if response.status_code != 200:
-        print("Failed to fetch Forex Factory news, status code:", response.status_code)
+        logging.error(f"Failed to fetch Forex Factory news, status code: {response.status_code}")
         raise Exception("Failed to fetch Forex Factory news")
     return response.content
 
@@ -56,15 +69,30 @@ def parse_and_analyze(xml_data):
     currency_stats = defaultdict(list)
 
     for item in root.findall("event"):
-        currency = item.find("currency").text
-        impact = item.find("impact").text
-        actual = item.find("actual").text
-        forecast = item.find("forecast").text
+        # Safely get elements and their text
+        currency_elem = item.find("currency")
+        impact_elem = item.find("impact")
+        actual_elem = item.find("actual")
+        forecast_elem = item.find("forecast")
+
+        if not (currency_elem and impact_elem and actual_elem and forecast_elem):
+            continue  # skip if any required field is missing
+
+        currency = currency_elem.text
+        impact = impact_elem.text
+        actual = actual_elem.text
+        forecast = forecast_elem.text
 
         if impact in ("High", "Medium") and actual and forecast:
             try:
-                actual_val = float(actual.replace("K", "000").replace("M", "000000").replace("%", ""))
-                forecast_val = float(forecast.replace("K", "000").replace("M", "000000").replace("%", ""))
+                # Replace K and M with numbers safely
+                def convert_val(val):
+                    val = val.replace("K", "000").replace("M", "000000").replace("%", "")
+                    return float(val)
+
+                actual_val = convert_val(actual)
+                forecast_val = convert_val(forecast)
+
                 if actual_val > forecast_val:
                     currency_stats[currency].append("Bullish")
                 elif actual_val < forecast_val:
@@ -72,7 +100,7 @@ def parse_and_analyze(xml_data):
                 else:
                     currency_stats[currency].append("Neutral")
             except Exception as e:
-                print(f"Error parsing values: {e}")
+                logging.warning(f"Error parsing values for currency {currency}: {e}")
                 continue
 
     final_result = {}
@@ -85,7 +113,7 @@ def parse_and_analyze(xml_data):
         else:
             final_result[currency] = "Neutral"
 
-    print("Parsed result:", final_result)
+    logging.info(f"Parsed result: {final_result}")
     return final_result
 
 @app.route('/summary.txt')
@@ -106,9 +134,8 @@ def news_summary_txt():
         output = "\n".join(lines)
         return Response(output, mimetype="text/plain")
 
-    except Exception as e:
-        print("Error in /summary.txt endpoint:")
-        traceback.print_exc()
+    except Exception:
+        logging.error("Error in /summary.txt endpoint", exc_info=True)
         return Response("Internal Server Error", status=500)
 
 @app.route('/ForexSentiment.csv')
@@ -130,9 +157,8 @@ def forex_sentiment_csv():
 
         return Response(csv_data, mimetype='text/csv', headers={"Content-disposition": "attachment; filename=ForexSentiment.csv"})
 
-    except Exception as e:
-        print("Error in /ForexSentiment.csv endpoint:")
-        traceback.print_exc()
+    except Exception:
+        logging.error("Error in /ForexSentiment.csv endpoint", exc_info=True)
         return Response("Internal Server Error", status=500)
 
 @app.route('/')
@@ -140,6 +166,7 @@ def home():
     return "API is working!"
 
 if __name__ == '__main__':
+    # Set logging level
+    logging.basicConfig(level=logging.INFO)
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
-
